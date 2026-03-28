@@ -2,12 +2,9 @@
 command: ['python', 'app/backend/run.py']
 
 env:
-  # Databricks Configuration (optional - app runs in demo mode without warehouse)
-  # To connect to a real warehouse, add a SQL Warehouse resource in the UI
-  # and uncomment the valueFrom line below
+  # Databricks Configuration
   - name: 'DATABRICKS_WAREHOUSE_ID'
-    value: ''  # Empty = demo mode
-    # valueFrom: 'sql-warehouse'  # Uncomment after adding resource
+    value: '03560442e95cb440'
 
   # Unity Catalog Configuration
   - name: 'CATALOG'
@@ -21,4 +18,6 @@ env:
 
   # Application Configuration
   - name: 'DEBUG'
+    value: 'false'
+  - name: 'DEMO_MODE'
     value: 'false'

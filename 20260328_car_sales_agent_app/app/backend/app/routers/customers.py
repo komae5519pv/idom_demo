@@ -132,6 +132,29 @@ async def get_customer_insights(customer_id: str) -> APIResponse:
             if insight:
                 return APIResponse(success=True, data=insight)
 
+        # UCのcustomer_insightsテーブルを先に確認（LLM生成をスキップ）
+        if not USE_DEMO:
+            insights_table = get_full_table_name("customer_insights")
+            insights_results = await db.execute_query(
+                f"SELECT * FROM {insights_table} WHERE customer_id = '{customer_id}' ORDER BY processed_at DESC LIMIT 1"
+            )
+            if insights_results:
+                ins = insights_results[0]
+                # deep_needs/key_quotes/concernsはパイプ区切り文字列 → リストに変換
+                def split_pipe(val):
+                    if not val:
+                        return []
+                    return [s.strip() for s in str(val).split("|") if s.strip()]
+                return APIResponse(success=True, data={
+                    "needs": split_pipe(ins.get("deep_needs")),
+                    "priorities": [],
+                    "avoid": split_pipe(ins.get("concerns")),
+                    "purchase_intent": ins.get("purchase_urgency", ""),
+                    "key_insight": ins.get("persona_summary", ""),
+                    "detected_keywords": split_pipe(ins.get("key_quotes")),
+                })
+
+
         # Get customer data
         if USE_DEMO:
             customer = get_demo_customer(customer_id)
@@ -145,12 +168,17 @@ async def get_customer_insights(customer_id: str) -> APIResponse:
                 raise HTTPException(status_code=404, detail="Customer not found")
 
             customer = results[0]
-            interaction = None
+            # 商談録音も取得してLLMコンテキストに含める
+            interactions_table = get_full_table_name("customer_interactions")
+            interaction_results = await db.execute_query(
+                f"SELECT * FROM {interactions_table} WHERE customer_id = '{customer_id}' ORDER BY interaction_date DESC LIMIT 1"
+            )
+            interaction = interaction_results[0] if interaction_results else None
 
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
 
-        # Generate insights using LLM if no pre-defined insight
+        # UCにインサイトがない場合のみLLMで生成
         transcript_text = ""
         if interaction and interaction.get("transcript"):
             transcript_text = f"\n\n商談録音テキスト:\n{interaction['transcript']}"

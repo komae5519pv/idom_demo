@@ -1,6 +1,6 @@
 # IDOM Car AI - アプリ実装設計書
 
-> **最終更新**: 2026-03-26
+> **最終更新**: 2026-03-28
 
 ---
 
@@ -12,13 +12,13 @@
 ### 1.2 処理フロー
 
 ```
-入力: 顧客との商談録音テキスト / LINE問い合わせ
+入力: 顧客との商談録音テキスト（Unity Catalogに格納済み）
   ↓
-AI Functions: 非構造化データからニーズを構造化抽出
+RAG: UCテーブルから顧客プロフィール・商談録音・インサイトを取得
   ↓
-マッチング: 在庫車両とのスコアリング
+Foundation Model API: ニーズ抽出 → 在庫とマッチング → 推薦理由生成
   ↓
-出力: おすすめ車両3台 + 提案理由 + トークスクリプト
+出力: おすすめ車両3台 + 提案理由 + トークスクリプト + AIチャット
 ```
 
 ### 1.3 Databricks機能の活用
@@ -26,10 +26,10 @@ AI Functions: 非構造化データからニーズを構造化抽出
 | 機能 | 用途 |
 |------|------|
 | **Databricks Apps** | フルスタックWebアプリケーション |
-| **AI Functions** | SQLでLLM呼び出し、非構造化→構造化変換 |
-| **Unity Catalog** | データガバナンス・アクセス制御 |
-| **Foundation Model API** | トークスクリプト生成 |
-| **Delta Lake** | データレイク基盤 |
+| **Unity Catalog** | 顧客・車両・商談データのガバナンス |
+| **Foundation Model API** | 推薦理由・トークスクリプト・チャット生成 |
+| **Delta Lake** | Bronze（録音テキスト）→Silver（インサイト）→Gold（推薦） |
+| **MLflow Tracing** | LLM呼び出しのトレーシング・品質評価 |
 
 ---
 
@@ -42,123 +42,68 @@ AI Functions: 非構造化データからニーズを構造化抽出
 ├── app.yaml              # Databricks Apps設定
 ├── requirements.txt      # Python依存関係
 ├── _images/              # 車両画像（10車種）
-│   ├── alphard.jpg
-│   ├── freed.jpg
-│   ├── harrier.jpg
-│   ├── lexus_rx.jpg
-│   ├── nbox.jpg
-│   ├── prius.jpg
-│   ├── sienta.jpg
-│   ├── vezel.jpg
-│   ├── volvo_xc60.jpg
-│   └── voxy.jpg
 ├── app/
 │   ├── backend/          # FastAPI バックエンド
 │   │   └── app/
 │   │       ├── main.py
 │   │       ├── config.py
-│   │       ├── database.py
-│   │       ├── llm.py
-│   │       ├── demo_data.py
+│   │       ├── database.py      # Databricks SDK Statement Execution API
+│   │       ├── llm.py           # Foundation Model API + MLflow trace
+│   │       ├── demo_data.py     # フォールバック用デモデータ
 │   │       ├── models.py
 │   │       └── routers/
 │   │           ├── customers.py
 │   │           ├── recommendations.py
-│   │           ├── chat.py
+│   │           ├── chat.py      # RAG実装（UCから顧客コンテキスト取得）
 │   │           └── admin.py
-│   └── dist/             # ビルド済みフロントエンド
-│       ├── index.html
-│       └── assets/
-├── 00_config             # 設定ノートブック
-└── 01_setup_demo_data    # デモデータセットアップ
+│   └── dist/             # ビルド済みフロントエンド（npm run build後にコピー）
+├── 00_config             # UCセットアップノートブック
+└── 01_setup_demo_data    # デモデータ投入ノートブック
 ```
 
 ### 2.2 技術スタック
 
-#### Frontend
-| カテゴリ | 技術 | バージョン |
-|---------|------|-----------|
-| Framework | React | 19.x |
-| Language | TypeScript | 5.9.x |
-| Styling | TailwindCSS | 4.x |
-| Icons | React Icons | - |
-| Build | Vite | 6.x |
-
-#### Backend
-| カテゴリ | 技術 |
-|---------|------|
-| Framework | FastAPI |
-| Runtime | Python 3.11+ |
-| DB Client | Databricks SQL Connector |
-| LLM Client | OpenAI SDK (Foundation Model API) |
+| レイヤー | カテゴリ | 技術 | バージョン |
+|---------|---------|------|-----------|
+| Frontend | Framework | React | 19.x |
+| Frontend | Language | TypeScript | 5.9.x |
+| Frontend | Styling | TailwindCSS | 4.x |
+| Frontend | Icons | React Icons | - |
+| Frontend | Build | Vite | 6.x |
+| Backend | Framework | FastAPI | - |
+| Backend | Runtime | Python | 3.11+ |
+| Backend | DB Client | Databricks SDK (Statement Execution API) | - |
+| Backend | LLM Client | OpenAI SDK → Foundation Model API | - |
+| Backend | Tracing | MLflow (`@mlflow.trace`) | - |
 
 ---
 
 ## 3. 画面構成
 
-### 3.1 顧客一覧画面 (`/sales`)
+### 3.1 顧客一覧画面 (`/`)
 - 顧客カードのリスト表示
 - 検索機能
 - 顧客クリックで詳細画面へ
 
-### 3.2 顧客詳細画面 (`/sales/customers/:customerId`)
+### 3.2 顧客詳細画面 (`/customers/:customerId`)
 
-**セクション構成（上から順に流れる縦方向レイアウト）：**
+**セクション構成（縦方向レイアウト）：**
 
 ```
 ┌─────────────────────────────────────┐
-│  ← 戻る   山田太郎                    │
-│          IT企業管理職 / 妻と子供2人   │
+│  ← 戻る   山田 優子                  │
+│          パート勤務（スーパー）       │
 ├─────────────────────────────────────┤
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🔵 顧客情報                       │ │ ← グラデーション: blue → indigo
-│  │ 氏名、職業、家族構成、現在の車    │ │
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🟠 印象的な発言                   │ │ ← グラデーション: amber → orange
-│  │ 「子供の送り迎えに...」           │ │    ※ key_quotesから取得
-│  │ 「燃費も気になります」            │ │
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🎤 商談録音テキスト（全文） ▼     │ │ ← 折りたたみ式（デフォルト閉）
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🟣 AIインサイト                   │ │ ← グラデーション: purple → pink
-│  │ ・主要ニーズ                      │ │
-│  │ ・深層インサイト                  │ │
-│  │ ・購買意欲                        │ │
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🔷 基本条件                       │ │ ← グラデーション: cyan → blue
-│  │ ご予算: ¥2,000,000 〜 ¥3,000,000 │ │
-│  │ 重視: [安全装備] [燃費]           │ │
-│  │ NG: [大きすぎる車]                │ │
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 🟢 お客様におすすめの車両  [再生成]│ │ ← グラデーション: green → teal
-│  │                                   │ │
-│  │ ┌─────┬───────────────────────┐ │ │
-│  │ │     │ #1 おすすめ           │ │ │
-│  │ │画像 │ トヨタ シエンタ ¥2.45M│ │ │    ※ 横レイアウト（画像左）
-│  │ │     │ なぜこの車が最適か... │ │ │
-│  │ │     │ この車のある生活...   │ │ │
-│  │ └─────┴───────────────────────┘ │ │
-│  │ （#2, #3も同様）                  │ │
-│  └─────────────────────────────────┘ │
-│                                       │
-│  ┌─────────────────────────────────┐ │
-│  │ 📝 提案トークスクリプト  [コピー] │ │ ← グラデーション: emerald → green
-│  │                                   │ │    ※ Markdownを整形表示
-│  │ ## アイスブレイク               │ │
-│  │ お子様の成長に合わせて...        │ │
-│  └─────────────────────────────────┘ │
-│                                       │
+│  🔵 顧客情報（氏名、職業、家族構成、現在の車）  │
+│  🟠 商談録音テキスト ▼（折りたたみ）           │
+│  🟣 AIインサイト（深層ニーズ・購買意欲）        │
+│  🔷 基本条件（予算・重視ポイント）              │
+│  🟢 お客様におすすめの車両 [再生成]            │
+│     #1 トヨタ シエンタ（マッチ度95%）          │
+│     #2 ホンダ フリード（マッチ度88%）           │
+│     #3 ...                                    │
+│  📝 提案トークスクリプト [コピー]              │
+│  💬 AIチャット（RAG付き）                      │
 └─────────────────────────────────────┘
 ```
 
@@ -167,11 +112,9 @@ AI Functions: 非構造化データからニーズを構造化抽出
 ## 4. UI/UX要件
 
 ### 4.1 全体デザイン
-- **縦方向に流れるレイアウト**（横幅ギチギチにしない）
-- `max-width: 4xl` (896px) でセンタリング
+- 縦方向に流れるレイアウト（`max-width: 4xl` でセンタリング）
 - 各セクションは `rounded-2xl` で角丸
 - グラデーションヘッダーで視覚的に区切る
-- 適切な余白 (`space-y-6`) でセクション間を区切る
 - 背景色: `bg-gray-50`
 
 ### 4.2 カラースキーム
@@ -189,7 +132,6 @@ AI Functions: 非構造化データからニーズを構造化抽出
 - **トークスクリプト**: Markdownを整形してHTML表示（#記号をそのまま表示しない）
 - **商談録音テキスト**: 折りたたみ式（デフォルト閉じ、クリックで展開）
 - **車両カード**: 横レイアウト（画像左、コンテンツ右）
-- **画像**: `object-cover object-center` で見切れ防止
 
 ---
 
@@ -197,156 +139,150 @@ AI Functions: 非構造化データからニーズを構造化抽出
 
 ### Customer API
 ```
-GET  /api/customers                    # 顧客一覧
-GET  /api/customers/:id                # 顧客詳細
-GET  /api/customers/:id/insights       # AIインサイト
-GET  /api/customers/:id/interaction    # 商談データ（transcript, key_quotes）
+GET  /api/customers                        # 顧客一覧
+GET  /api/customers/:id                    # 顧客詳細
+GET  /api/customers/:id/insights           # AIインサイト
+GET  /api/customers/:id/interaction        # 商談データ（transcript）
 ```
 
 ### Recommendation API
 ```
-GET  /api/customers/:id/recommendations    # レコメンド取得
-POST /api/recommendations/regenerate       # レコメンド再生成
+GET  /api/customers/:id/recommendations    # レコメンド取得（LLM生成）
+POST /api/customers/:id/recommendations/regenerate  # 再生成
+GET  /api/vehicles                         # 車両一覧
 ```
 
 ### Chat API
 ```
-POST /api/chat                         # チャット送信
-POST /api/chat/stream                  # ストリーミングチャット
+POST /api/chat                             # チャット送信（RAG付き）
+POST /api/chat/stream                      # ストリーミングチャット
+GET  /api/chat/history/:session_id         # 履歴取得
+DELETE /api/chat/history/:session_id       # 履歴クリア
 ```
 
 ### Admin API
 ```
-GET  /api/admin/stats                  # 統計情報
-GET  /api/admin/traces                 # トレース一覧
+GET  /api/admin/stats                      # 統計情報
+GET  /api/admin/traces                     # MLflowトレース一覧
+GET  /api/admin/evaluations                # LLM評価一覧
 ```
 
 ### その他
 ```
-GET  /api/health                       # ヘルスチェック
-GET  /api/images/:filename             # 車両画像配信
+GET  /api/health                           # ヘルスチェック（database/llm接続状態）
+GET  /api/images/:filename                 # 車両画像配信
 ```
 
 ---
 
-## 6. データモデル
+## 6. データモデル（Pythonモデル）
 
 ### 6.1 顧客データ
-```typescript
-interface Customer {
-  customer_id: string
-  name: string
-  age: number
-  occupation: string
-  family_structure: string
-  budget_min: number
-  budget_max: number
-  current_car?: string
-}
+```python
+class Customer(BaseModel):
+    customer_id: str
+    name: str
+    age: int
+    gender: Optional[str]
+    occupation: Optional[str]
+    address: Optional[str]
+    family_structure: Optional[str]
+    current_vehicle: Optional[str]
+    budget_min: Optional[int]
+    budget_max: Optional[int]
+    preferences: Optional[str]
+    background: Optional[str]
 ```
 
-### 6.2 商談データ
-```typescript
-interface CustomerInteraction {
-  transcript: string           // 商談録音テキスト全文
-  interaction_date?: string
-  interaction_type?: string
-  key_quotes?: string[]        // 印象的な発言
-}
-```
-
-### 6.3 AIインサイト
-```typescript
-interface CustomerInsight {
-  needs: string[]              // 主要ニーズ
-  priorities: string[]         // 重視ポイント
-  avoid: string[]              // 避けたい要素
-  purchase_intent: string      // 購買意欲
-  key_insight?: string         // 深層インサイト
-}
-```
-
-### 6.4 車両レコメンド
-```typescript
-interface VehicleRecommendation {
-  vehicle: Vehicle
-  match_score: number          // マッチ度（0-100）
-  reason: string               // なぜこの車が最適か
-  headline?: string            // キャッチコピー
-  life_scene?: string          // この車のある生活シーン
-}
+### 6.2 車両レコメンド
+```python
+class VehicleRecommendation(BaseModel):
+    vehicle: Vehicle
+    match_score: int           # 0-100
+    reason: str                # 推薦理由（顧客の発言を引用）
+    headline: Optional[str]
 ```
 
 ---
 
-## 7. デモデータ
+## 7. Unity Catalogデータ（実データ）
 
-### 7.1 顧客データ（5名）
+### 7.1 顧客データ（4名）
+
 | ID | 名前 | 年齢 | 職業 | 家族構成 | 予算 |
 |----|------|------|------|---------|------|
-| C001 | 山田太郎 | 42 | IT企業管理職 | 妻と子供2人 | 200-300万 |
-| C002 | 鈴木花子 | 35 | 医療従事者 | 夫と子供1人 | 180-280万 |
-| C003 | 田中一郎 | 55 | 自営業 | 夫婦2人 | 400-600万 |
-| C004 | 佐藤美咲 | 28 | 会社員 | 独身 | 150-250万 |
-| C005 | 伊藤健一 | 48 | 建設業 | 妻と子供3人 | 300-450万 |
+| C001 | 山田 優子 | 38 | パート勤務（スーパー） | 夫・長女（小4）・長男（小1）・義母（72歳） | 180〜280万 |
+| C002 | 佐藤 健一 | 52 | 中堅メーカー 営業部長 | 妻・長女（独立）・長男（大4） | 300〜450万 |
+| C003 | 田中 翔太 | 29 | IT企業 システムエンジニア | 独身・彼女あり | 150〜230万 |
+| C004 | 渡辺 雅子 | 45 | 外資系コンサル シニアマネージャー | 夫（医師）・長女（中2）・長男（小5） | 400〜600万 |
 
 ### 7.2 車両データ（10台）
-| 車種 | タイプ | 価格帯 | 特徴 |
-|------|--------|--------|------|
-| N-BOX | 軽 | 100-150万 | コンパクト、低燃費 |
-| フリード | ミニバン（小） | 180-250万 | コンパクトミニバン |
-| シエンタ | ミニバン（小） | 180-250万 | ハイブリッド |
-| ヴォクシー | ミニバン（中） | 250-350万 | ファミリー向け |
-| アルファード | ミニバン（大） | 400-600万 | 高級ミニバン |
-| ヴェゼル | SUV（小） | 200-300万 | コンパクトSUV |
-| ハリアー | SUV（中） | 300-450万 | 高級SUV |
-| レクサスRX | SUV（大） | 500-800万 | プレミアムSUV |
-| プリウス | セダン | 250-350万 | ハイブリッド |
-| ボルボXC60 | SUV | 500-700万 | 北欧デザイン |
+
+| 車種 | メーカー | タイプ | 価格 | 特徴 |
+|------|---------|--------|------|------|
+| シエンタ | トヨタ | ミニバン | 228万 | 低床・両側電動スライドドア・Toyota Safety Sense |
+| フリード | ホンダ | ミニバン | 205万 | Honda SENSING・コンパクト |
+| ヴェゼル | ホンダ | SUV | 265万 | スタイリッシュ・e:HEV |
+| ハリアー | トヨタ | SUV | 385万 | プレミアム・JBL・本革シート |
+| プリウス | トヨタ | セダン | 329万 | 新デザイン・パノラマルーフ |
+| レクサス NX | レクサス | SUV | 580万 | マークレビンソン・デジタルアウターミラー |
+| ボルボ XC40 | ボルボ | SUV | 520万 | 安全性最高水準・Harman Kardon |
+| アルファード | トヨタ | ミニバン | 720万 | 最上級・本革・JBL |
+| フォレスター | スバル | SUV | 315万 | EyeSight・AWD・大型ガラスルーフ |
+| BMW 3シリーズ | BMW | セダン | 498万 | 本革・ドライビングマシン |
 
 ---
 
-## 8. デプロイ手順
+## 8. RAG実装（chat.py）
 
-### 8.1 フロントエンドビルド
+チャットの新セッション開始時に UCテーブルから顧客コンテキストを取得してシステムプロンプトに注入：
+
+```
+customers テーブル      → 顧客プロフィール・背景・予算
+customer_interactions  → 最新商談録音テキスト（直近1件）
+customer_insights      → AI分析インサイト（存在する場合）
+```
+
+→ LLM が「山田様のお義母様（72歳）が乗り降りしやすい車は...」など個別化された回答を生成
+
+---
+
+## 9. デプロイ手順
+
+### フロントエンドビルド & デプロイ
 ```bash
-cd /Users/konomi.omae/code/idom-car-ai/app/frontend
+cd app/frontend
 npm run build
-```
 
-### 8.2 ワークスペースへアップロード
-```bash
-# Python スクリプトでアップロード（upload_frontend.py）
-# dist/ → app/dist/
-# backend/*.py → app/backend/app/
-```
+# dist をコピー（FastAPIはapp/dist/をserveする）
+rm -rf ../dist && cp -r dist ../dist
 
-### 8.3 デプロイ
-```bash
+# Databricksワークスペースに同期してデプロイ
 databricks apps deploy idom-car-ai \
-  --source-code-path /Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent \
-  --profile=e2-demo-west
+  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
+  --mode SNAPSHOT
+```
+
+### バックエンドのみ変更した場合
+```bash
+databricks workspace import /path/in/workspace \
+  --file /local/file.py --format AUTO --overwrite
+
+databricks apps deploy idom-car-ai \
+  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
+  --mode SNAPSHOT
 ```
 
 ---
 
-## 9. 環境情報
+## 10. 環境情報
 
 | 項目 | 値 |
 |------|-----|
-| Workspace | `e2-demo-field-eng.cloud.databricks.com` |
-| App URL | `https://idom-car-ai-1444828305810485.aws.databricksapps.com/` |
+| App URL | https://idom-car-ai-1444828305810485.aws.databricksapps.com/ |
+| Workspace | e2-demo-field-eng.cloud.databricks.com (ID: 1444828305810485) |
 | Source Path | `/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent` |
-| Profile | `e2-demo-west` |
-
----
-
-## 10. 参考
-
-### プロトタイプノートブック
-`/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_recommend_agent/02_recommend_demo`
-
-このノートブックのUI要素を参考に、良い要素を取り入れてアプリをパワーアップする。
-
-### ローカル開発環境
-`/Users/konomi.omae/code/idom-car-ai/`
+| SQL Warehouse | `my_warehouse` (ID: `03560442e95cb440`, Small) |
+| Catalog | `komae_demo_v4` |
+| Schema | `idom_car_ai` |
+| LLM Model | `databricks-claude-sonnet-4` |

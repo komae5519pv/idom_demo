@@ -7,231 +7,192 @@ IDOM Car AI は、中古車販売店向けの AI アシスタント Databricks A
 
 ---
 
+## 現在の状態（2026年3月28日）
+
+**本番モードで稼働中**
+
+- Unity Catalog テーブル作成済み・デモデータ投入済み
+- Foundation Model API（databricks-claude-sonnet-4）でリアルなLLM応答
+- AIチャットはRAGで UCテーブルから顧客コンテキストを取得して回答
+- App URL: https://idom-car-ai-1444828305810485.aws.databricksapps.com/
+
+---
+
 ## デモモード vs 本番モード
 
-### アーキテクチャ図
+### 切り替えの仕組み
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      アプリ起動時                            │
-├─────────────────────────────────────────────────────────────┤
 │  DATABRICKS_WAREHOUSE_ID が設定されている？                  │
-│                                                             │
 │     YES → Unity Catalog に接続（本番モード）                 │
 │     NO  → デモモードで起動（ハードコードされたデータを使用）  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 現在の状態（2026年3月時点）
-
-**デモモードで動作中**
-- Unity Catalog テーブルは作成されていない
-- `app/backend/app/demo_data.py` のハードコードデータを使用
-- LLM呼び出しもデモレスポンスを返却
-
----
-
-## デモモードの仕組み
-
-### データソース
+### データソース対照表
 
 | データ種別 | デモモード | 本番モード |
 |-----------|-----------|-----------|
-| 顧客データ | `DEMO_CUSTOMERS` | `komae_demo_v4.idom_car_ai.customers` |
-| 車両在庫 | `DEMO_VEHICLES` | `komae_demo_v4.idom_car_ai.vehicle_inventory` |
-| 商談録音 | `DEMO_INTERACTIONS` | `komae_demo_v4.idom_car_ai.customer_interactions` |
-| 顧客インサイト | `DEMO_INSIGHTS` | `komae_demo_v4.idom_car_ai.customer_insights` |
-| レコメンド | `DEMO_RECOMMENDATIONS` | LLM生成 + UC保存 |
-| MLflowトレース | `DEMO_TRACES` | MLflow Tracking Server |
-| 評価データ | `DEMO_EVALUATIONS` | MLflow Evaluation API |
+| 顧客データ | `demo_data.py` | `komae_demo_v4.idom_car_ai.customers` |
+| 車両在庫 | `demo_data.py` | `komae_demo_v4.idom_car_ai.vehicle_inventory` |
+| 商談録音 | `demo_data.py` | `komae_demo_v4.idom_car_ai.customer_interactions` |
+| 顧客インサイト | `demo_data.py` | `komae_demo_v4.idom_car_ai.customer_insights` |
+| LLM応答 | ハードコード | Foundation Model API (claude-sonnet-4) |
+| AIチャット | ハードコード | RAG + Foundation Model API |
+
+---
+
+## Unity Catalog 構成
+
+### カタログ / スキーマ
+
+```
+komae_demo_v4
+  └── idom_car_ai
+        ├── customers              # 顧客プロフィール
+        ├── vehicle_inventory      # 車両在庫
+        ├── customer_interactions  # 商談録音テキスト（Bronze）
+        ├── customer_insights      # AIインサイト（Silver）
+        └── recommendations        # 推薦結果（Gold）
+```
+
+### 投入済みデモデータ
+
+| テーブル | 件数 | 内容 |
+|---------|------|------|
+| `customers` | 4名 | 山田優子(C001)・佐藤健一(C002)・田中翔太(C003)・渡辺雅子(C004) |
+| `vehicle_inventory` | 10台 | シエンタ・フリード・ヴェゼル・ハリアー・プリウス・レクサスNX・ボルボXC40・アルファード・フォレスター・BMW3シリーズ |
+| `customer_interactions` | 4件 | 各顧客の来店商談録音テキスト（リアルな話し言葉） |
+| `customer_insights` | 4件 | 深層ニーズ・購入緊急度・キーフレーズ |
+
+---
+
+## app.yaml（現在の設定）
+
+```yaml
+command: ['python', 'app/backend/run.py']
+
+env:
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    value: '03560442e95cb440'      # my_warehouse (Small, RUNNING)
+
+  - name: 'CATALOG'
+    value: 'komae_demo_v4'
+  - name: 'SCHEMA_NAME'
+    value: 'idom_car_ai'
+
+  - name: 'LLM_MODEL'
+    value: 'databricks-claude-sonnet-4'
+
+  - name: 'DEBUG'
+    value: 'false'
+  - name: 'DEMO_MODE'
+    value: 'false'
+```
+
+---
+
+## バックエンド構成
 
 ### 関連ファイル
 
 ```
 app/backend/app/
-├── demo_data.py          # 全デモデータの定義
-├── database.py           # UC接続 or デモモード判定
-├── llm.py                # LLM接続 or デモレスポンス
-├── config.py             # 設定（catalog, schema等）
+├── config.py             # 設定（catalog, schema, warehouse等）
+├── database.py           # Databricks SDK Statement Execution API で UCクエリ
+├── llm.py                # Foundation Model API クライアント（MLflowトレース付き）
+├── demo_data.py          # フォールバック用ハードコードデータ
 └── routers/
-    ├── customers.py      # USE_DEMO フラグで分岐
-    ├── recommendations.py # USE_DEMO フラグで分岐
-    └── admin.py          # DEMO_TRACES, DEMO_EVALUATIONS
+    ├── customers.py      # 顧客CRUD + インサイト取得
+    ├── recommendations.py # LLMによる車両推薦 + トークスクリプト生成
+    ├── chat.py           # RAG付きAIチャット
+    └── admin.py          # LLMOps管理画面
 ```
 
-### デモモード判定ロジック
+### database.py の実装方針
+
+Databricks SDK の `statement_execution.execute_statement()` を使用。
+（旧: `databricks-sql-connector` → 認証トークン取得の問題でSDK方式に変更）
 
 ```python
-# app/backend/app/routers/customers.py
-USE_DEMO = os.getenv("DEMO_MODE", "true").lower() == "true"
-
-# app/backend/app/database.py
-if not settings.databricks_warehouse_id:
-    print("Databricks not configured - using demo mode")
-    self._demo_mode = True
+response = self._client.statement_execution.execute_statement(
+    warehouse_id=self._warehouse_id,
+    statement=query,
+    wait_timeout="30s",
+)
 ```
 
----
+### chat.py の RAG 実装
 
-## Unity Catalog 設定
+チャット開始時（新セッション）に UC から顧客コンテキストを取得してシステムプロンプトに注入：
 
-### テーブル構成
+1. `customers` テーブル → 顧客プロフィール・背景・予算
+2. `customer_interactions` テーブル → 最新商談録音テキスト（直近1件）
+3. `customer_insights` テーブル → AI分析インサイト（存在する場合）
 
-| テーブル名 | 説明 |
-|-----------|------|
-| `customers` | 顧客マスタ（名前、年齢、職業、予算等） |
-| `vehicle_inventory` | 車両在庫（メーカー、車種、価格、走行距離等） |
-| `customer_interactions` | 商談録音のトランスクリプト |
-| `customer_insights` | LLMで抽出した顧客インサイト |
-| `recommendations` | レコメンド結果の履歴 |
-
-### 設定値
-
-```yaml
-# app.yaml
-env:
-  - name: 'CATALOG'
-    value: 'komae_demo_v4'
-  - name: 'SCHEMA_NAME'
-    value: 'idom_car_ai'
-  - name: 'DATABRICKS_WAREHOUSE_ID'
-    value: ''  # 空 = デモモード
-```
-
----
-
-## 本番モードへの移行手順
-
-### 1. Unity Catalog セットアップ
-
-Databricks ワークスペースで以下のノートブックを順番に実行：
-
-```
-00_config.py        → カタログ、スキーマ、テーブル構造を作成
-01_setup_demo_data.py → デモデータを投入
-```
-
-### 2. SQL Warehouse リソースの追加
-
-Databricks Apps の UI で：
-1. アプリの設定画面を開く
-2. Resources タブで SQL Warehouse を追加
-3. リソース名を `sql-warehouse` に設定
-
-### 3. app.yaml の更新
-
-```yaml
-env:
-  - name: 'DATABRICKS_WAREHOUSE_ID'
-    valueFrom: 'sql-warehouse'  # リソースから取得
-
-  - name: 'DEMO_MODE'
-    value: 'false'
-```
-
-### 4. 再デプロイ
-
-```bash
-databricks apps deploy idom-car-ai --source-code-path /Workspace/Users/.../app
-```
+これにより「山田様のお義母様（72歳）が乗り降りしやすい車種は...」のような個別化された回答が可能。
 
 ---
 
 ## LLMOps 機能（管理者画面）
 
-### 概要
-
-管理者画面では以下の LLMOps 機能を提供：
-
-| 機能 | 説明 | デモモード |
-|------|------|-----------|
-| ダッシュボード | KPI概要（推論数、レイテンシ、エラー率） | `DEMO_TRACES` から集計 |
-| MLflow Traces | LLM呼び出しのトレーシング | `DEMO_TRACES` を表示 |
-| Gateway Metrics | Serving Endpoint メトリクス | ダミーデータ |
-| Evaluations | LLM-as-Judge 評価 | `DEMO_EVALUATIONS` を表示 |
-| Data Catalog | UC テーブル一覧 | 静的リスト |
-
-### LLM-as-Judge とは
-
-LLM の出力品質を別の LLM が評価する仕組み：
-
-```
-[ユーザー入力] → [対象LLM] → [出力] → [Judge LLM] → [スコア]
-                                         ↓
-                              Relevance, Faithfulness,
-                              Helpfulness (1-5点)
-```
-
-**品質改善の方法：**
-1. プロンプトエンジニアリング（Few-shot例、Chain-of-Thought）
-2. RAG の改善（チャンク、埋め込みモデル、リランキング）
-3. モデル選択・Temperature 調整
-4. 低スコアケースの分析 → プロンプト改善 → 再評価
+| 機能 | 説明 |
+|------|------|
+| ダッシュボード | KPI概要（推論数、レイテンシ、エラー率） |
+| MLflow Traces | LLM呼び出しのトレーシング（`@mlflow.trace`デコレーター） |
+| Evaluations | LLM-as-Judge 評価（Relevance・Faithfulness・Helpfulness） |
+| Data Catalog | UC テーブル一覧（実テーブルへのリンク） |
 
 ---
 
 ## フロントエンド構成
 
-### 技術スタック
-
-- React 19 + TypeScript 5.9
-- TailwindCSS 4
-- React Icons（アイコン）
-- Vite（ビルド）
-
-### ページ構成
+- React 19 + TypeScript 5.9 + TailwindCSS 4 + Vite
 
 ```
-/                    → 顧客一覧（営業担当向け）
-/customers/:id       → 顧客詳細 + レコメンド + トークスクリプト
-/admin               → 管理者ダッシュボード
-/admin/traces        → MLflow Traces 一覧
-/admin/gateway       → Gateway Metrics
-/admin/evaluations   → LLM 評価一覧
-/admin/catalog       → データカタログ
+/                    → 顧客一覧
+/customers/:id       → 顧客詳細 + レコメンド + トークスクリプト + AIチャット
+/admin               → LLMOps管理画面
 ```
-
-### トークスクリプト表示
-
-顧客詳細ページのトークスクリプトは、セクション別にカード表示：
-
-| セクション | 色 | アイコン |
-|-----------|-----|---------|
-| 導入 | 青 | 👋 |
-| 共感ポイント | 紫 | 💜 |
-| ご提案 | 緑 | 🚗 |
-| クロージング | 黄 | 🎯 |
 
 ---
 
 ## デプロイ手順
 
-### ビルド & デプロイ
+### フロントエンドビルド & デプロイ
 
 ```bash
 # フロントエンドビルド
 cd app/frontend
 npm run build
 
-# dist をコピー（重要！）
-rm -rf ../dist
-cp -r dist ../dist
+# dist をコピー（重要！FastAPIはapp/dist/をserveする）
+rm -rf ../dist && cp -r dist ../dist
 
-# 同期 & デプロイ
+# デプロイ
 cd ../..
-databricks sync --watch . /Workspace/Users/.../app
-databricks apps deploy idom-car-ai
+databricks apps deploy idom-car-ai \
+  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
+  --mode SNAPSHOT
 ```
 
-**注意**: `app/dist/` と `app/frontend/dist/` は別物。FastAPI は `app/dist/` を serve するため、ビルド後に必ずコピーすること。
+### バックエンドのみ変更した場合
+
+```bash
+# ファイルをワークスペースにimportしてからデプロイ
+databricks workspace import /path/in/workspace --file /local/file --format AUTO --overwrite
+databricks apps deploy idom-car-ai \
+  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
+  --mode SNAPSHOT
+```
 
 ---
 
-## 参考リンク
+## 参考
 
-- アプリ URL: https://idom-car-ai-1444828305810485.aws.databricksapps.com/
-- ワークスペース: e2-demo-field-eng
+- App URL: https://idom-car-ai-1444828305810485.aws.databricksapps.com/
+- ワークスペース: e2-demo-field-eng (1444828305810485)
+- SQL Warehouse: `my_warehouse` (ID: `03560442e95cb440`)
 
----
-
-*最終更新: 2026-03-26*
+*最終更新: 2026-03-28*

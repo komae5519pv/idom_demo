@@ -88,6 +88,75 @@ async def health_check() -> HealthResponse:
     )
 
 
+@app.get("/api/debug/db")
+async def debug_db():
+    """Temporary debug endpoint to diagnose DB connection."""
+    import os, httpx
+    result = {
+        "DATABRICKS_HOST": os.environ.get("DATABRICKS_HOST", "NOT SET"),
+        "DATABRICKS_TOKEN": "SET" if os.environ.get("DATABRICKS_TOKEN") else "NOT SET",
+        "DATABRICKS_CLIENT_ID": "SET" if os.environ.get("DATABRICKS_CLIENT_ID") else "NOT SET",
+        "DATABRICKS_APP_NAME": os.environ.get("DATABRICKS_APP_NAME", "NOT SET"),
+        "warehouse_id": db._warehouse_id,
+        "host": db._host,
+        "demo_mode": db._demo_mode,
+        "initialized": db._initialized,
+        "auth_headers": {},
+        "query_result": None,
+        "query_error": None,
+    }
+    # Test auth
+    try:
+        headers = db._get_auth_headers()
+        result["auth_headers"] = {k: v[:20] + "..." if len(v) > 20 else v for k, v in headers.items()}
+    except Exception as e:
+        result["auth_error"] = str(e)
+    # Test basic query
+    try:
+        rows = await db.execute_query("SELECT 1 AS test")
+        result["query_result"] = rows
+    except Exception as e:
+        result["query_error"] = str(e)
+    # Test actual insights query for C001
+    try:
+        from app.config import get_full_table_name
+        insights_table = get_full_table_name("customer_insights")
+        insights_rows = await db.execute_query(
+            f"SELECT customer_id, persona_summary, deep_needs FROM {insights_table} WHERE customer_id = 'C001' LIMIT 1"
+        )
+        result["insights_query_result"] = insights_rows
+        result["insights_query_count"] = len(insights_rows)
+    except Exception as e:
+        result["insights_query_error"] = str(e)
+    # Check DEMO_MODE env var
+    result["DEMO_MODE_env"] = os.environ.get("DEMO_MODE", "NOT SET")
+    # Test recommendations query for all customers
+    try:
+        from app.config import get_full_table_name
+        rec_table = get_full_table_name("recommendations")
+        rec_rows = await db.execute_query(
+            f"SELECT customer_id, LENGTH(recommendations_json) as json_len FROM {rec_table} ORDER BY customer_id"
+        )
+        result["rec_table_rows"] = rec_rows
+    except Exception as e:
+        result["rec_table_error"] = str(e)
+    # Test actual C001 parse
+    try:
+        import json as _json
+        rec_rows2 = await db.execute_query(
+            f"SELECT recommendations_json FROM {rec_table} WHERE customer_id = 'C001' LIMIT 1"
+        )
+        if rec_rows2:
+            parsed = _json.loads(rec_rows2[0]["recommendations_json"])
+            result["c001_rec_count"] = len(parsed)
+            result["c001_rec_models"] = [r["vehicle"]["model"] for r in parsed]
+        else:
+            result["c001_rec_count"] = "EMPTY - no rows returned"
+    except Exception as e:
+        result["c001_rec_error"] = str(e)
+    return result
+
+
 # Mount images directory
 _images_dir = find_images_dir()
 if _images_dir:
