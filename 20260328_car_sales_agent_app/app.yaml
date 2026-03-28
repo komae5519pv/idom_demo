@@ -1,0 +1,24 @@
+# Databricks Apps Configuration for IDOM Car AI
+command: ['python', 'app/backend/run.py']
+
+env:
+  # Databricks Configuration (optional - app runs in demo mode without warehouse)
+  # To connect to a real warehouse, add a SQL Warehouse resource in the UI
+  # and uncomment the valueFrom line below
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    value: ''  # Empty = demo mode
+    # valueFrom: 'sql-warehouse'  # Uncomment after adding resource
+
+  # Unity Catalog Configuration
+  - name: 'CATALOG'
+    value: 'komae_demo_v4'
+  - name: 'SCHEMA_NAME'
+    value: 'idom_car_ai'
+
+  # LLM Configuration
+  - name: 'LLM_MODEL'
+    value: 'databricks-claude-sonnet-4'
+
+  # Application Configuration
+  - name: 'DEBUG'
+    value: 'false'
