@@ -1,0 +1,28 @@
+command: ["uvicorn", "idom_car_ai.backend.app:app", "--workers", "2"]
+
+env:
+  # Unity Catalog Configuration
+  - name: 'CATALOG'
+    value: 'komae_demo_v4'
+  - name: 'SCHEMA_NAME'
+    value: 'idom_car_ai'
+
+  # LLM Configuration
+  - name: 'LLM_MODEL'
+    value: 'databricks-claude-sonnet-4'
+
+  # Agent Endpoint (Multi-Agent Supervisor)
+  - name: 'AGENT_ENDPOINT_NAME'
+    value: 'mas-c850699f-endpoint'
+
+  # SQL Warehouse (leave empty for demo mode)
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    value: ''
+
+  # Python path (for source-based deployment)
+  - name: 'PYTHONPATH'
+    value: '.'
+
+  # Application Configuration
+  - name: 'DEBUG'
+    value: 'false'

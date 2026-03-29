@@ -13,17 +13,15 @@
 
 # COMMAND ----------
 
-# 設定値（00_configと同じ）
-CATALOG = "komae_demo_v4"
-SCHEMA = "idom_car_ai"
-FULL_SCHEMA = f"{CATALOG}.{SCHEMA}"
-VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/images"
-LLM_MODEL = "databricks-claude-sonnet-4"
+# MAGIC %run ./00_config
 
-spark.sql(f"USE CATALOG {CATALOG}")
-spark.sql(f"USE SCHEMA {SCHEMA}")
+# COMMAND ----------
+
+# 00_configで定義された変数を補完
+VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
 
 print(f"Using: {FULL_SCHEMA}")
+print(f"Volume path: {VOLUME_PATH}")
 
 # COMMAND ----------
 
@@ -101,7 +99,7 @@ customers_data = [
 
 # DataFrameに変換して保存
 customers_df = spark.createDataFrame(customers_data)
-customers_df.write.mode("overwrite").saveAsTable(f"{FULL_SCHEMA}.customers")
+customers_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(f"{FULL_SCHEMA}.customers")
 
 print(f"✓ 顧客データを {FULL_SCHEMA}.customers に投入しました（{len(customers_data)}件）")
 display(spark.table(f"{FULL_SCHEMA}.customers").select("customer_id", "name", "age", "occupation"))
@@ -162,7 +160,7 @@ interactions_data = [
 
 # DataFrameに変換して保存
 interactions_df = spark.createDataFrame(interactions_data)
-interactions_df.write.mode("overwrite").saveAsTable(f"{FULL_SCHEMA}.customer_interactions")
+interactions_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(f"{FULL_SCHEMA}.customer_interactions")
 
 print(f"✓ 商談録音データを {FULL_SCHEMA}.customer_interactions に投入しました（{len(interactions_data)}件）")
 display(spark.table(f"{FULL_SCHEMA}.customer_interactions").select("customer_id", "interaction_date", "duration_minutes"))
@@ -340,7 +338,7 @@ vehicles_data = [
 
 # DataFrameに変換して保存
 vehicles_df = spark.createDataFrame(vehicles_data)
-vehicles_df.write.mode("overwrite").saveAsTable(f"{FULL_SCHEMA}.vehicle_inventory")
+vehicles_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(f"{FULL_SCHEMA}.vehicle_inventory")
 
 print(f"✓ 車両在庫データを {FULL_SCHEMA}.vehicle_inventory に投入しました（{len(vehicles_data)}件）")
 display(spark.table(f"{FULL_SCHEMA}.vehicle_inventory").select("vehicle_id", "make", "model", "year", "price"))
@@ -391,29 +389,31 @@ for img in required_images:
 # 注: Workspaceのファイルに直接アクセスするには dbutils を使用
 
 try:
-    # Volumeディレクトリの存在確認
+    # Volumeディレクトリの存在確認（00_configで作成済み）
     dbutils.fs.ls(volume_images_path)
-    print(f"✓ Volume exists: {volume_images_path}")
-except:
-    print(f"Creating volume directory...")
-    dbutils.fs.mkdirs(volume_images_path)
+    print(f"✓ Volume path accessible: {volume_images_path}")
+except Exception as e:
+    print(f"Volume path check failed: {e}")
 
-# Workspace上の画像をVolumeにコピー
+# Workspace上の画像をVolumeにコピー（shutil使用: dbutils.fs.cpはWorkspaceパスに非対応）
+import shutil
+import os
+
 copied_count = 0
 missing_images = []
 
 for img_name in required_images:
-    src_path = f"file:{workspace_images_path}/{img_name}"
-    dest_path = f"{volume_images_path}/{img_name}"
+    src_path = f"{workspace_images_path}/{img_name}"
+    dest_path = f"/Volumes/{CATALOG}/{SCHEMA}/images/{img_name}"
 
     try:
-        # Workspaceファイルの場合は /Workspace プレフィックスを使う
-        # dbutils.fs.cp でコピー
-        dbutils.fs.cp(f"file:/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_recommend_agent/_images/{img_name}", dest_path)
+        if not os.path.exists(src_path):
+            raise FileNotFoundError(f"Source not found: {src_path}")
+        shutil.copy2(src_path, dest_path)
         print(f"✓ Copied: {img_name}")
         copied_count += 1
     except Exception as e:
-        print(f"✗ Missing: {img_name} - {str(e)[:50]}")
+        print(f"✗ Missing: {img_name} - {str(e)[:80]}")
         missing_images.append(img_name)
 
 print(f"\n=== 結果 ===")
@@ -523,3 +523,275 @@ print(sample_query)
 
 # 実行する場合は以下のコメントを解除
 # display(spark.sql(sample_query))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. UCメタデータ設定（Genie最適化）
+# MAGIC
+# MAGIC テーブル説明・カラムコメント・NOT NULL制約・PK/FK・認定済みタグを設定します。
+# MAGIC GenieがテーブルのデータとリレーションをAIで解釈するために重要な設定です。
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-1. customers テーブル
+
+# COMMAND ----------
+
+certified_tag = 'system.Certified'
+table_name = f"{FULL_SCHEMA}.customers"
+
+# テーブルコメント
+spark.sql(f'''COMMENT ON TABLE {table_name} IS
+"テーブル名: customers / 顧客マスタ
+説明: IDOMの見込み顧客情報を管理するマスタテーブル。年齢・職業・家族構成・現在の乗車・予算・重視ポイント・背景情報を保持し、AIによる推薦・トークスクリプト生成の基盤データとなる。"
+''')
+
+# カラムコメント
+column_comments = {
+    "customer_id":        "顧客を一意に識別するID（C001〜）",
+    "name":               "顧客氏名（苗字 + 名前）",
+    "age":                "顧客の年齢（歳）",
+    "gender":             "性別（男性 / 女性）",
+    "occupation":         "職業・役職",
+    "address":            "居住地（都道府県・市区町村）",
+    "family_structure":   "家族構成の詳細（同居家族の年齢・職業・特記事項を含む）",
+    "current_vehicle":    "現在乗っている車のメーカー・モデル・年式・走行距離",
+    "budget_min":         "購入予算の下限（円）",
+    "budget_max":         "購入予算の上限（円）",
+    "preferences":        "車選びで重視するポイント（安全・燃費・積載量・デザインなど）",
+    "background":         "商談背景・生活状況の詳細テキスト（AIによる深層ニーズ分析に使用）",
+    "created_at":         "レコード作成日時",
+}
+
+for col, cmt in column_comments.items():
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} COMMENT '{cmt}'")
+
+# NOT NULL制約
+for col in ["customer_id", "name"]:
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} SET NOT NULL")
+
+# 主キー
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS pk_customers")
+spark.sql(f"ALTER TABLE {table_name} ADD CONSTRAINT pk_customers PRIMARY KEY (customer_id)")
+
+# 認定済みタグ
+try:
+    spark.sql(f"ALTER TABLE {table_name} SET TAGS ('{certified_tag}')")
+    print(f"✓ customers: 認定済みタグ追加完了")
+except Exception as e:
+    print(f"△ customers: タグ追加スキップ（{e}）")
+
+print(f"✓ customers: メタデータ設定完了")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-2. vehicle_inventory テーブル
+
+# COMMAND ----------
+
+table_name = f"{FULL_SCHEMA}.vehicle_inventory"
+
+spark.sql(f'''COMMENT ON TABLE {table_name} IS
+"テーブル名: vehicle_inventory / 車両在庫テーブル
+説明: IDOM取扱い車両の在庫情報を管理するテーブル。メーカー・モデル・年式・価格・ボディタイプ・燃料種別・走行距離・カラー・装備・画像パス・説明文・在庫ステータスを保持する。推薦エンジンおよびGenie検索の対象テーブル。"
+''')
+
+column_comments = {
+    "vehicle_id":     "車両を一意に識別するID（V001〜）",
+    "make":           "メーカー名（例：トヨタ、ホンダ、レクサス、ボルボ）",
+    "model":          "車種名・モデル名（例：シエンタ、ヴェゼル、NX）",
+    "year":           "製造年（西暦）",
+    "price":          "販売価格（円・税込）",
+    "body_type":      "ボディタイプ（SUV / ミニバン / セダン / 軽自動車）",
+    "fuel_type":      "燃料種別（ハイブリッド / ガソリン / マイルドハイブリッド / EV）",
+    "mileage":        "走行距離（km）",
+    "color":          "外装カラー名",
+    "features":       "主な装備・特徴のリスト（安全システム・内装・オプション等）",
+    "image_path":     "車両画像のファイル名（/api/images/ 配下で提供）",
+    "description":    "車両の説明文（販売トーク・特徴の要約テキスト）",
+    "status":         "在庫ステータス（在庫あり / 商談中 / 売約済み）",
+    "created_at":     "レコード作成日時",
+}
+
+for col, cmt in column_comments.items():
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} COMMENT '{cmt}'")
+
+for col in ["vehicle_id", "make", "model", "price", "status"]:
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} SET NOT NULL")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS pk_vehicle_inventory")
+spark.sql(f"ALTER TABLE {table_name} ADD CONSTRAINT pk_vehicle_inventory PRIMARY KEY (vehicle_id)")
+
+try:
+    spark.sql(f"ALTER TABLE {table_name} SET TAGS ('{certified_tag}')")
+    print(f"✓ vehicle_inventory: 認定済みタグ追加完了")
+except Exception as e:
+    print(f"△ vehicle_inventory: タグ追加スキップ（{e}）")
+
+print(f"✓ vehicle_inventory: メタデータ設定完了")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-3. customer_interactions テーブル
+
+# COMMAND ----------
+
+table_name = f"{FULL_SCHEMA}.customer_interactions"
+
+spark.sql(f'''COMMENT ON TABLE {table_name} IS
+"テーブル名: customer_interactions / 商談録音テキストテーブル
+説明: 来店顧客との商談内容を記録するテーブル。音声認識で書き起こした商談トランスクリプト・担当営業・来店日・商談時間を保持する。AIによる顧客インサイト抽出（customer_insights）の元データとなる。"
+''')
+
+column_comments = {
+    "interaction_id":    "商談記録を一意に識別するID（UUID）",
+    "customer_id":       "顧客ID（customersテーブルのcustomer_idと紐づくFK）",
+    "interaction_date":  "商談日（来店日）",
+    "interaction_type":  "商談種別（来店 / 電話 / オンライン）",
+    "sales_rep":         "担当営業担当者名",
+    "transcript":        "商談の書き起こしテキスト（音声認識そのまま、話者識別なし）",
+    "duration_minutes":  "商談時間（分）",
+    "created_at":        "レコード作成日時",
+}
+
+for col, cmt in column_comments.items():
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} COMMENT '{cmt}'")
+
+for col in ["interaction_id", "customer_id"]:
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} SET NOT NULL")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS pk_customer_interactions")
+spark.sql(f"ALTER TABLE {table_name} ADD CONSTRAINT pk_customer_interactions PRIMARY KEY (interaction_id)")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS fk_interactions_customer")
+spark.sql(f"""ALTER TABLE {table_name}
+ADD CONSTRAINT fk_interactions_customer
+FOREIGN KEY (customer_id) REFERENCES {FULL_SCHEMA}.customers(customer_id)""")
+
+try:
+    spark.sql(f"ALTER TABLE {table_name} SET TAGS ('{certified_tag}')")
+    print(f"✓ customer_interactions: 認定済みタグ追加完了")
+except Exception as e:
+    print(f"△ customer_interactions: タグ追加スキップ（{e}）")
+
+print(f"✓ customer_interactions: メタデータ設定完了")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-4. customer_insights テーブル
+
+# COMMAND ----------
+
+table_name = f"{FULL_SCHEMA}.customer_insights"
+
+spark.sql(f'''COMMENT ON TABLE {table_name} IS
+"テーブル名: customer_insights / 顧客インサイトテーブル
+説明: 商談録音テキストをAIで分析して生成した顧客インサイトを保持するテーブル。ペルソナ要約・深層ニーズ・印象的な発言・懸念点・重視ポイント・ライフステージ・購買緊急度・信頼スコアを管理する。Genieによる顧客理解深化に活用。"
+''')
+
+column_comments = {
+    "insight_id":              "インサイトレコードを一意に識別するID（UUID）",
+    "customer_id":             "顧客ID（customersテーブルのcustomer_idと紐づくFK）",
+    "interaction_id":          "元となった商談ID（customer_interactionsテーブルのinteraction_idと紐づくFK）",
+    "persona_summary":         "AIが生成した顧客ペルソナの要約テキスト（生活背景・価値観・行動特性）",
+    "deep_needs":              "AIが抽出した深層ニーズ（表面的な希望の背後にある本質的ニーズ）",
+    "key_quotes":              "商談中の印象的な発言リスト（JSON配列形式）",
+    "concerns":                "顧客の懸念点・不安要素",
+    "preferences_extracted":   "AIが抽出した具体的な車選びの優先事項",
+    "life_stage":              "ライフステージ分類（例：子育て中ファミリー・定年前シニア・若手社会人）",
+    "purchase_urgency":        "購買緊急度（高 / 中 / 低）",
+    "confidence_score":        "インサイト分析の信頼スコア（0.0〜1.0）",
+    "processed_at":            "インサイト生成日時",
+    "model_used":              "使用したLLMモデル名",
+}
+
+for col, cmt in column_comments.items():
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} COMMENT '{cmt}'")
+
+for col in ["insight_id", "customer_id"]:
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} SET NOT NULL")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS pk_customer_insights")
+spark.sql(f"ALTER TABLE {table_name} ADD CONSTRAINT pk_customer_insights PRIMARY KEY (insight_id)")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS fk_insights_customer")
+spark.sql(f"""ALTER TABLE {table_name}
+ADD CONSTRAINT fk_insights_customer
+FOREIGN KEY (customer_id) REFERENCES {FULL_SCHEMA}.customers(customer_id)""")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS fk_insights_interaction")
+spark.sql(f"""ALTER TABLE {table_name}
+ADD CONSTRAINT fk_insights_interaction
+FOREIGN KEY (interaction_id) REFERENCES {FULL_SCHEMA}.customer_interactions(interaction_id)""")
+
+try:
+    spark.sql(f"ALTER TABLE {table_name} SET TAGS ('{certified_tag}')")
+    print(f"✓ customer_insights: 認定済みタグ追加完了")
+except Exception as e:
+    print(f"△ customer_insights: タグ追加スキップ（{e}）")
+
+print(f"✓ customer_insights: メタデータ設定完了")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-5. recommendations テーブル
+
+# COMMAND ----------
+
+table_name = f"{FULL_SCHEMA}.recommendations"
+
+spark.sql(f'''COMMENT ON TABLE {table_name} IS
+"テーブル名: recommendations / 車両推薦結果テーブル
+説明: 顧客ごとにAIが生成した車両推薦結果を保持するテーブル。推薦車両リスト（JSON）・マッチスコア・推薦理由・営業トークスクリプト・生成日時・使用モデルを管理する。アプリのGET /recommendations エンドポイントがこのテーブルを参照（UC読み取りキャッシュパターン）。"
+''')
+
+column_comments = {
+    "recommendation_id":    "推薦レコードを一意に識別するID（UUID）",
+    "customer_id":          "顧客ID（customersテーブルのcustomer_idと紐づくFK）",
+    "recommendations_json": "推薦車両リストのJSONテキスト（vehicle情報・match_score・reason を含む配列）",
+    "talk_script":          "AI生成の営業トークスクリプト（Markdown形式・Format B：第1位/第2位/第3位構成）",
+    "generated_at":         "推薦データの生成日時",
+    "model_used":           "推薦生成に使用したLLMモデル名",
+}
+
+for col, cmt in column_comments.items():
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} COMMENT '{cmt}'")
+
+for col in ["recommendation_id", "customer_id"]:
+    spark.sql(f"ALTER TABLE {table_name} ALTER COLUMN {col} SET NOT NULL")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS pk_recommendations")
+spark.sql(f"ALTER TABLE {table_name} ADD CONSTRAINT pk_recommendations PRIMARY KEY (recommendation_id)")
+
+spark.sql(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS fk_recommendations_customer")
+spark.sql(f"""ALTER TABLE {table_name}
+ADD CONSTRAINT fk_recommendations_customer
+FOREIGN KEY (customer_id) REFERENCES {FULL_SCHEMA}.customers(customer_id)""")
+
+try:
+    spark.sql(f"ALTER TABLE {table_name} SET TAGS ('{certified_tag}')")
+    print(f"✓ recommendations: 認定済みタグ追加完了")
+except Exception as e:
+    print(f"△ recommendations: タグ追加スキップ（{e}）")
+
+print(f"✓ recommendations: メタデータ設定完了")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 6-6. 設定結果の確認
+
+# COMMAND ----------
+
+print("=== UCメタデータ設定確認 ===\n")
+for tbl in ["customers", "vehicle_inventory", "customer_interactions", "customer_insights", "recommendations"]:
+    full = f"{FULL_SCHEMA}.{tbl}"
+    result = spark.sql(f"DESCRIBE EXTENDED {full}").filter("col_name IN ('Comment', 'Table Properties')")
+    print(f"【{tbl}】")
+    result.show(truncate=80)

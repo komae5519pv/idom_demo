@@ -1,288 +1,253 @@
-# IDOM Car AI - アプリ実装設計書
+# IDOM Car AI - 設計ドキュメント
 
-> **最終更新**: 2026-03-28
-
----
-
-## 1. デモ概要
-
-### 1.1 ユースケース
-営業担当者が顧客対応時に、AIが商談内容から顧客ニーズを自動抽出し、最適な車両を提案するシステム。
-
-### 1.2 処理フロー
-
-```
-入力: 顧客との商談録音テキスト（Unity Catalogに格納済み）
-  ↓
-RAG: UCテーブルから顧客プロフィール・商談録音・インサイトを取得
-  ↓
-Foundation Model API: ニーズ抽出 → 在庫とマッチング → 推薦理由生成
-  ↓
-出力: おすすめ車両3台 + 提案理由 + トークスクリプト + AIチャット
-```
-
-### 1.3 Databricks機能の活用
-
-| 機能 | 用途 |
-|------|------|
-| **Databricks Apps** | フルスタックWebアプリケーション |
-| **Unity Catalog** | 顧客・車両・商談データのガバナンス |
-| **Foundation Model API** | 推薦理由・トークスクリプト・チャット生成 |
-| **Delta Lake** | Bronze（録音テキスト）→Silver（インサイト）→Gold（推薦） |
-| **MLflow Tracing** | LLM呼び出しのトレーシング・品質評価 |
+> 営業担当者向け車両提案AIアプリケーション。顧客の深層ニーズを分析し、最適な車両をレコメンドする。
 
 ---
 
-## 2. アプリ構成
+## 1. 概要
 
-### 2.1 ディレクトリ構造
+| 項目 | 値 |
+|------|-----|
+| アプリ名 | idom-car-ai |
+| Workspace | e2-demo-field-eng.cloud.databricks.com |
+| Catalog | komae_demo_v4 |
+| Schema | idom_car_ai |
+| App URL | https://idom-car-ai-1444828305810485.aws.databricksapps.com |
+| App SP | `2cbe757a-6afe-4dc4-a375-151c10ab6735`（app-40zbx9 idom-car-ai） |
 
-```
-20260406_car_ai_agent/
-├── app.yaml              # Databricks Apps設定
-├── requirements.txt      # Python依存関係
-├── _images/              # 車両画像（10車種）
-├── app/
-│   ├── backend/          # FastAPI バックエンド
-│   │   └── app/
-│   │       ├── main.py
-│   │       ├── config.py
-│   │       ├── database.py      # Databricks SDK Statement Execution API
-│   │       ├── llm.py           # Foundation Model API + MLflow trace
-│   │       ├── demo_data.py     # フォールバック用デモデータ
-│   │       ├── models.py
-│   │       └── routers/
-│   │           ├── customers.py
-│   │           ├── recommendations.py
-│   │           ├── chat.py      # RAG実装（UCから顧客コンテキスト取得）
-│   │           └── admin.py
-│   └── dist/             # ビルド済みフロントエンド（npm run build後にコピー）
-├── 00_config             # UCセットアップノートブック
-└── 01_setup_demo_data    # デモデータ投入ノートブック
-```
+---
 
-### 2.2 技術スタック
+## 2. 技術スタック
 
 | レイヤー | カテゴリ | 技術 | バージョン |
 |---------|---------|------|-----------|
 | Frontend | Framework | React | 19.x |
 | Frontend | Language | TypeScript | 5.9.x |
 | Frontend | Styling | TailwindCSS | 4.x |
-| Frontend | Icons | React Icons | - |
+| Frontend | Icons | React Icons (Fi, Hi2, Lu) | 5.x |
 | Frontend | Build | Vite | 6.x |
-| Backend | Framework | FastAPI | - |
+| Frontend | State | Zustand | 5.x |
+| Frontend | Router | react-router-dom | 7.x |
+| Backend | Framework | FastAPI | >=0.115.0 |
 | Backend | Runtime | Python | 3.11+ |
-| Backend | DB Client | Databricks SDK (Statement Execution API) | - |
-| Backend | LLM Client | OpenAI SDK → Foundation Model API | - |
+| Backend | DB Client | databricks-sql-connector | >=3.0.0 |
+| Backend | DB SDK | Databricks SDK | >=0.30.0 |
+| Backend | LLM Client | OpenAI SDK → Foundation Model API | >=1.52.0 |
 | Backend | Tracing | MLflow (`@mlflow.trace`) | - |
+| Infrastructure | Compute | Databricks Apps | - |
+| Infrastructure | Data | Unity Catalog + Delta Lake | - |
+| Infrastructure | AI/Agent | Multi-Agent Supervisor (MAS) endpoint | - |
+| Infrastructure | Orchestration | DAB (Databricks Asset Bundles) | - |
 
 ---
 
-## 3. 画面構成
-
-### 3.1 顧客一覧画面 (`/`)
-- 顧客カードのリスト表示
-- 検索機能
-- 顧客クリックで詳細画面へ
-
-### 3.2 顧客詳細画面 (`/customers/:customerId`)
-
-**セクション構成（縦方向レイアウト）：**
+## 3. ディレクトリ構成
 
 ```
-┌─────────────────────────────────────┐
-│  ← 戻る   山田 優子                  │
-│          パート勤務（スーパー）       │
-├─────────────────────────────────────┤
-│  🔵 顧客情報（氏名、職業、家族構成、現在の車）  │
-│  🟠 商談録音テキスト ▼（折りたたみ）           │
-│  🟣 AIインサイト（深層ニーズ・購買意欲）        │
-│  🔷 基本条件（予算・重視ポイント）              │
-│  🟢 お客様におすすめの車両 [再生成]            │
-│     #1 トヨタ シエンタ（マッチ度95%）          │
-│     #2 ホンダ フリード（マッチ度88%）           │
-│     #3 ...                                    │
-│  📝 提案トークスクリプト [コピー]              │
-│  💬 AIチャット（RAG付き）                      │
-└─────────────────────────────────────┘
-```
-
----
-
-## 4. UI/UX要件
-
-### 4.1 全体デザイン
-- 縦方向に流れるレイアウト（`max-width: 4xl` でセンタリング）
-- 各セクションは `rounded-2xl` で角丸
-- グラデーションヘッダーで視覚的に区切る
-- 背景色: `bg-gray-50`
-
-### 4.2 カラースキーム
-
-| セクション | グラデーション |
-|-----------|---------------|
-| 顧客情報 | blue-600 → indigo-600 |
-| 印象的な発言 | amber-500 → orange-500 |
-| AIインサイト | purple-600 → pink-600 |
-| 基本条件 | cyan-600 → blue-600 |
-| おすすめ車両 | green-600 → teal-600 |
-| トークスクリプト | emerald-600 → green-600 |
-
-### 4.3 重要な表示ルール
-- **トークスクリプト**: Markdownを整形してHTML表示（#記号をそのまま表示しない）
-- **商談録音テキスト**: 折りたたみ式（デフォルト閉じ、クリックで展開）
-- **車両カード**: 横レイアウト（画像左、コンテンツ右）
-
----
-
-## 5. API エンドポイント
-
-### Customer API
-```
-GET  /api/customers                        # 顧客一覧
-GET  /api/customers/:id                    # 顧客詳細
-GET  /api/customers/:id/insights           # AIインサイト
-GET  /api/customers/:id/interaction        # 商談データ（transcript）
-```
-
-### Recommendation API
-```
-GET  /api/customers/:id/recommendations    # レコメンド取得（LLM生成）
-POST /api/customers/:id/recommendations/regenerate  # 再生成
-GET  /api/vehicles                         # 車両一覧
-```
-
-### Chat API
-```
-POST /api/chat                             # チャット送信（RAG付き）
-POST /api/chat/stream                      # ストリーミングチャット
-GET  /api/chat/history/:session_id         # 履歴取得
-DELETE /api/chat/history/:session_id       # 履歴クリア
-```
-
-### Admin API
-```
-GET  /api/admin/stats                      # 統計情報
-GET  /api/admin/traces                     # MLflowトレース一覧
-GET  /api/admin/evaluations                # LLM評価一覧
-```
-
-### その他
-```
-GET  /api/health                           # ヘルスチェック（database/llm接続状態）
-GET  /api/images/:filename                 # 車両画像配信
+idom-car-ai/
+├── app.yml                         # Databricks Apps設定（起動コマンド・環境変数）
+├── databricks.yml                  # DAB設定（bundle定義・sync先）
+├── pyproject.toml                  # Pythonパッケージ設定（hatchling）
+├── APP_REQUIREMENTS.md             # 本ドキュメント
+├── 00_config.py                    # デモ環境設定スクリプト
+├── 01_setup_demo_data.py           # デモデータ投入スクリプト
+│
+├── _images/                        # ローカル開発用フォールバック画像
+│   └── volvo_xc60.jpg              # 唯一のローカル実画像
+│
+├── src/                            # Pythonソース（Databricks Appsにデプロイされる）
+│   └── idom_car_ai/
+│       ├── __dist__/               # フロントエンドビルド成果物（gitignore推奨）
+│       └── backend/
+│           ├── app.py              # FastAPIアプリケーション エントリーポイント
+│           ├── config.py           # 設定（env vars・Databricks接続）
+│           ├── database.py         # Databricks SQL接続管理
+│           ├── demo_data.py        # デモモード用ダミーデータ
+│           ├── llm.py              # LLM（Foundation Model API）クライアント
+│           ├── models.py           # Pydanticモデル定義
+│           └── routers/
+│               ├── chat.py         # Ask AI チャットエンドポイント（MAS呼び出し）
+│               ├── customers.py    # 顧客データAPI
+│               ├── recommendations.py  # 車両レコメンドAPI
+│               └── admin.py        # 管理者向けAPI（MLflow・Gateway監視）
+│
+├── app/
+│   └── frontend/                   # Reactフロントエンド
+│       ├── package.json
+│       ├── vite.config.ts          # ビルド先: ../../src/idom_car_ai/__dist__
+│       ├── tailwind.config.ts
+│       └── src/
+│           ├── api/index.ts        # バックエンドAPI呼び出し（SSE含む）
+│           ├── store/index.ts      # Zustand グローバルステート
+│           ├── types/              # TypeScript型定義
+│           ├── pages/
+│           │   ├── sales/          # 営業担当者向けUI
+│           │   │   ├── CustomerList.tsx
+│           │   │   └── CustomerDetail.tsx
+│           │   └── admin/          # 管理者向けUI
+│           └── components/
+│               ├── chat/
+│               │   └── ChatSidebar.tsx  # Ask AI サイドバー（幅調整・MD表示・履歴）
+│               └── common/
+│
+└── .build/                         # デプロイ用ビルドディレクトリ（gitignore推奨）
+    ├── app.yml
+    ├── requirements.txt
+    ├── idom_car_ai/                 # src/idom_car_ai/ のコピー + __dist__
+    └── _images/                     # ローカル画像フォールバック
 ```
 
 ---
 
-## 6. データモデル（Pythonモデル）
+## 4. Unity Catalog 構成
 
-### 6.1 顧客データ
-```python
-class Customer(BaseModel):
-    customer_id: str
-    name: str
-    age: int
-    gender: Optional[str]
-    occupation: Optional[str]
-    address: Optional[str]
-    family_structure: Optional[str]
-    current_vehicle: Optional[str]
-    budget_min: Optional[int]
-    budget_max: Optional[int]
-    preferences: Optional[str]
-    background: Optional[str]
-```
+### テーブル
 
-### 6.2 車両レコメンド
-```python
-class VehicleRecommendation(BaseModel):
-    vehicle: Vehicle
-    match_score: int           # 0-100
-    reason: str                # 推薦理由（顧客の発言を引用）
-    headline: Optional[str]
-```
+| テーブル | 用途 |
+|---------|------|
+| `komae_demo_v4.idom_car_ai.customers` | 顧客マスタ |
+| `komae_demo_v4.idom_car_ai.vehicle_inventory` | 在庫車両マスタ（`image_path`: ファイル名のみ） |
+| `komae_demo_v4.idom_car_ai.customer_interactions` | 商談録音テキスト |
+| `komae_demo_v4.idom_car_ai.customer_insights` | AI抽出インサイト（キャッシュ） |
+| `komae_demo_v4.idom_car_ai.recommendations` | AI生成レコメンド（キャッシュ） |
+
+### Volume
+
+| Volume | 用途 | パス |
+|--------|------|------|
+| `komae_demo_v4.idom_car_ai.images` | 車両画像（JPEG） | `/Volumes/komae_demo_v4/idom_car_ai/images/` |
+| `komae_demo_v4.idom_car_ai.knowledge` | RAG用ナレッジ文書 | `/Volumes/komae_demo_v4/idom_car_ai/knowledge/` |
+
+**画像ファイル一覧:** `harrier.jpg`, `sienta.jpg`, `freed.jpg`, `voxy.jpg`, `alphard.jpg`, `vezel.jpg`, `prius.jpg`, `nbox.jpg`, `lexus_rx.jpg`
+
+> `vehicle_inventory.image_path` はファイル名のみ（例: `"harrier.jpg"`）。アプリが `/api/images/{filename}` エンドポイント経由でVolumeからSDKストリーミング配信。
 
 ---
 
-## 7. Unity Catalogデータ（実データ）
+## 5. 権限設定（Databricks Apps SP）
 
-### 7.1 顧客データ（4名）
+Databricks Appsは専用のサービスプリンシパル（SP）で動作する。以下の権限を付与済み。
 
-| ID | 名前 | 年齢 | 職業 | 家族構成 | 予算 |
-|----|------|------|------|---------|------|
-| C001 | 山田 優子 | 38 | パート勤務（スーパー） | 夫・長女（小4）・長男（小1）・義母（72歳） | 180〜280万 |
-| C002 | 佐藤 健一 | 52 | 中堅メーカー 営業部長 | 妻・長女（独立）・長男（大4） | 300〜450万 |
-| C003 | 田中 翔太 | 29 | IT企業 システムエンジニア | 独身・彼女あり | 150〜230万 |
-| C004 | 渡辺 雅子 | 45 | 外資系コンサル シニアマネージャー | 夫（医師）・長女（中2）・長男（小5） | 400〜600万 |
+**SP情報:**
+- Application ID: `2cbe757a-6afe-4dc4-a375-151c10ab6735`
+- Display Name: `app-40zbx9 idom-car-ai`
 
-### 7.2 車両データ（10台）
+**GRANTコマンド（新環境で再実行が必要）:**
 
-| 車種 | メーカー | タイプ | 価格 | 特徴 |
-|------|---------|--------|------|------|
-| シエンタ | トヨタ | ミニバン | 228万 | 低床・両側電動スライドドア・Toyota Safety Sense |
-| フリード | ホンダ | ミニバン | 205万 | Honda SENSING・コンパクト |
-| ヴェゼル | ホンダ | SUV | 265万 | スタイリッシュ・e:HEV |
-| ハリアー | トヨタ | SUV | 385万 | プレミアム・JBL・本革シート |
-| プリウス | トヨタ | セダン | 329万 | 新デザイン・パノラマルーフ |
-| レクサス NX | レクサス | SUV | 580万 | マークレビンソン・デジタルアウターミラー |
-| ボルボ XC40 | ボルボ | SUV | 520万 | 安全性最高水準・Harman Kardon |
-| アルファード | トヨタ | ミニバン | 720万 | 最上級・本革・JBL |
-| フォレスター | スバル | SUV | 315万 | EyeSight・AWD・大型ガラスルーフ |
-| BMW 3シリーズ | BMW | セダン | 498万 | 本革・ドライビングマシン |
+```sql
+-- アプリSPのApplication IDに置き換えること
+GRANT USE CATALOG ON CATALOG <catalog_name> TO `<sp_application_id>`;
+GRANT USE SCHEMA ON SCHEMA <catalog_name>.<schema_name> TO `<sp_application_id>`;
+GRANT READ VOLUME ON VOLUME <catalog_name>.<schema_name>.images TO `<sp_application_id>`;
+
+-- テーブルアクセスも必要な場合
+GRANT SELECT ON SCHEMA <catalog_name>.<schema_name> TO `<sp_application_id>`;
+```
+
+> SPのApplication IDは `databricks apps get <app-name>` → `service_principal_id` → `databricks api get /api/2.0/preview/scim/v2/ServicePrincipals/<id>` → `applicationId` で確認。
+
+### MAS（Model Serving）エンドポイントへの権限
+
+Multi-Agent Supervisor エンドポイント（`mas-c850699f-endpoint`）にもアプリSPからのアクセス権限が必要。
+
+**設定手順（UIから）:**
+1. Databricks UI → **Serving** → 対象エンドポイント（`mas-c850699f-endpoint`）を開く
+2. 右上の **Permission** ボタンをクリック
+3. アプリSPのDisplay Name（`app-40zbx9 idom-car-ai`）を検索して追加
+4. 権限: **Can Query**
+
+> 新環境でエンドポイント名が変わる場合は `app.yml` の `AGENT_ENDPOINT_NAME` も合わせて更新すること。
 
 ---
 
-## 8. RAG実装（chat.py）
+## 6. 環境変数（app.yml）
 
-チャットの新セッション開始時に UCテーブルから顧客コンテキストを取得してシステムプロンプトに注入：
+| 変数名 | 説明 | デフォルト |
+|--------|------|-----------|
+| `CATALOG` | Unity Catalogカタログ名 | `komae_demo_v4` |
+| `SCHEMA_NAME` | スキーマ名 | `idom_car_ai` |
+| `LLM_MODEL` | Foundation Model API モデル名 | `databricks-claude-sonnet-4` |
+| `AGENT_ENDPOINT_NAME` | Multi-Agent Supervisor エンドポイント名 | `mas-c850699f-endpoint` |
+| `DATABRICKS_WAREHOUSE_ID` | SQL Warehouse ID（空=デモモード） | `""` |
+| `PYTHONPATH` | Pythonモジュールパス | `"."` |
+| `DEBUG` | デバッグフラグ | `"false"` |
 
-```
-customers テーブル      → 顧客プロフィール・背景・予算
-customer_interactions  → 最新商談録音テキスト（直近1件）
-customer_insights      → AI分析インサイト（存在する場合）
-```
-
-→ LLM が「山田様のお義母様（72歳）が乗り降りしやすい車は...」など個別化された回答を生成
+> `DATABRICKS_WAREHOUSE_ID` が空の場合、`demo_data.py` のダミーデータを使用。実データを使う場合はWarehouse IDを設定。
 
 ---
 
-## 9. デプロイ手順
+## 7. デプロイ手順
 
-### フロントエンドビルド & デプロイ
+### 前提条件
+
 ```bash
+# Databricks CLI v0.263.0+
+databricks --version
+
+# Node.js 18+, npm
+node --version
+
+# Databricks profile設定済み
+databricks auth status
+```
+
+### 手順
+
+```bash
+# 1. フロントエンドビルド
 cd app/frontend
+npm install
 npm run build
+# → src/idom_car_ai/__dist__/ に出力
 
-# dist をコピー（FastAPIはapp/dist/をserveする）
-rm -rf ../dist && cp -r dist ../dist
+# 2. フロントエンドをワークスペースにアップロード（必ずこのパスに）
+databricks workspace import-dir src/idom_car_ai/__dist__ \
+  /Workspace/Users/<your-email>/idom-car-ai/idom_car_ai/__dist__ --overwrite
 
-# Databricksワークスペースに同期してデプロイ
+# 3. Pythonソースをワークスペースにアップロード
+databricks workspace import-dir src/idom_car_ai/backend \
+  /Workspace/Users/<your-email>/idom-car-ai/idom_car_ai/backend --overwrite
+
+# 4. app.yml・requirements.txtをアップロード
+databricks workspace import /Workspace/Users/<your-email>/idom-car-ai/app.yml \
+  --file app.yml --overwrite --format RAW
+databricks workspace import /Workspace/Users/<your-email>/idom-car-ai/requirements.txt \
+  --file requirements.txt --overwrite --format RAW
+
+# 5. Databricks Appをデプロイ
 databricks apps deploy idom-car-ai \
-  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
-  --mode SNAPSHOT
+  --source-code-path /Workspace/Users/<your-email>/idom-car-ai
 ```
 
-### バックエンドのみ変更した場合
-```bash
-databricks workspace import /path/in/workspace \
-  --file /local/file.py --format AUTO --overwrite
+> ⚠️ **重要**: フロントエンドは必ず `src/idom_car_ai/__dist__` → `idom_car_ai/__dist__` に直接アップロードすること。`.build/` 経由で丸ごとアップロードすると古いJSで上書きされる。
 
-databricks apps deploy idom-car-ai \
-  --source-code-path "/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent" \
-  --mode SNAPSHOT
+### デプロイ後の確認
+
+```bash
+# アプリの状態確認
+databricks apps get idom-car-ai
+
+# ワークスペースのJSが最新か確認（ハッシュ値が新ビルドと一致すること）
+databricks workspace list /Workspace/Users/<your-email>/idom-car-ai/idom_car_ai/__dist__/assets
 ```
 
 ---
 
-## 10. 環境情報
+## 8. MAS（Multi-Agent Supervisor）連携
 
-| 項目 | 値 |
-|------|-----|
-| App URL | https://idom-car-ai-1444828305810485.aws.databricksapps.com/ |
-| Workspace | e2-demo-field-eng.cloud.databricks.com (ID: 1444828305810485) |
-| Source Path | `/Workspace/Users/konomi.omae@databricks.com/03_External_Work/20260406_car_ai_agent` |
-| SQL Warehouse | `my_warehouse` (ID: `03560442e95cb440`, Small) |
-| Catalog | `komae_demo_v4` |
-| Schema | `idom_car_ai` |
-| LLM Model | `databricks-claude-sonnet-4` |
+- エンドポイント: `{DATABRICKS_HOST}/serving-endpoints/{AGENT_ENDPOINT_NAME}/invocations`
+- リクエスト形式: `{"input": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]}`
+- レスポンス: `output[]` の最後の非ルーティングメッセージが最終回答
+- SSEでプログレス・コンテンツを分けてストリーミング配信
+
+---
+
+## 9. デモモードと本番モードの切り替え
+
+| | デモモード | 本番モード |
+|--|-----------|-----------|
+| 切り替え | `DATABRICKS_WAREHOUSE_ID=''` | `DATABRICKS_WAREHOUSE_ID='<id>'` |
+| データソース | `demo_data.py` | Unity Catalog テーブル |
+| 顧客データ | ハードコード10名 | `customers` テーブル |
+| レコメンド | `recommendations` テーブルなし→デモ固定 | AI生成キャッシュ読み込み |
+| 画像 | Volume（権限設定済みなら同じ） | Volume |
